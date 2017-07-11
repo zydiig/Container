@@ -20,6 +20,7 @@ MS_PRIVATE = 262144
 
 _libc = ctypes.CDLL("libc.so.6", use_errno=True)
 
+
 def unshare(flags):
     if _libc.unshare(flags) != 0:
         raise OSError(ctypes.get_errno(), os.strerror(ctypes.get_errno()))

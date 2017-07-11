@@ -11,10 +11,10 @@ logging.basicConfig(format='%(levelname)s:%(message)s', level=logging.INFO)
 
 
 def require_root(fn):
-    def wrapper():
+    def wrapper(*kargs, **kwargs):
         if os.geteuid() != 0:
             raise Exception("Only root can do this.")
-        fn()
+        fn(*kargs, **kwargs)
 
     return wrapper
 
@@ -44,7 +44,7 @@ if __name__ == "__main__":
         ("devtmpfs", "udev", os.path.join(root_path, "dev"), ["mode=0755", "nosuid"]),
         ("devpts", "devpts", os.path.join(root_path, "dev/pts"), ["mode=0620", "gid=5", "nosuid", "noexec"]),
         ("tmpfs", "shm", os.path.join(root_path, "dev/shm"), ["mode=1777", "nosuid", "nodev"]),
-        ("tmpfs", "run", os.path.join(root_path, "run"), ["nosuid", "nodev", "mode=0755", "uid={}".format(t_uid), "uid={}".format(t_gid)]),
+        ("tmpfs", "run", os.path.join(root_path, "run"), ["nosuid", "nodev", "mode=0755", "uid={}".format(t_uid), "gid={}".format(t_gid)]),
         ("tmpfs", "tmp", os.path.join(root_path, "tmp"), ["mode=1777", "strictatime", "nodev", "nosuid"])
     ]
     for mount_ops in mounts:
