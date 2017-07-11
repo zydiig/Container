@@ -1,7 +1,7 @@
-import argparse
 import ctypes
 import logging
 import os
+import re
 
 CLONE_NEWNS = 0x00020000
 CLONE_NEWUTS = 0x04000000
@@ -9,7 +9,7 @@ CLONE_NEWIPC = 0x08000000
 CLONE_NEWUSER = 0x10000000
 CLONE_NEWPID = 0x20000000
 CLONE_NEWNET = 0x40000000
-CLONE_NEWCGROUP = 0x02000000
+CLONE_NEWCGROUP = 0x02000000  # from include/uapi/linux/sched.h in Linux source code.
 
 MS_NOSUID = 2
 MS_NODEV = 4
@@ -27,6 +27,7 @@ def unshare(flags):
 
 
 def sys_mount(*kargs):
+    kargs = [(karg.encode("utf-8") if isinstance(karg, str) else karg) for karg in kargs]
     if _libc.mount(*kargs) != 0:
         raise OSError(ctypes.get_errno(), os.strerror(ctypes.get_errno()))
 
@@ -37,6 +38,12 @@ def sethostname(hostname: str):
         raise OSError(ctypes.get_errno(), os.strerror(ctypes.get_errno()))
 
 
+def chroot(path: str):
+    if _libc.chroot(path.encode("utf-8")) != 0:
+        raise OSError(ctypes.get_errno(), os.strerror(ctypes.get_errno()))
+
+
+# Inheritable pipes for IPC.
 class Pipe:
     def __init__(self):
         self.r, self.w = os.pipe()
@@ -59,7 +66,7 @@ class Pipe:
 def child(pipe1, pipe2, cgroup, ipc, mount, proc_path, pid, net, uts, user, uid_map, gid_map, cmd, hostname):
     """
     Requires to be root.
-    User namespacing gives us a full set of caps, but that's too much of a hassle for me.
+    User namespaces gives us a full set of caps, but that's too much of a hassle for me.
     """
     flags = 0
     if cgroup:
@@ -69,33 +76,45 @@ def child(pipe1, pipe2, cgroup, ipc, mount, proc_path, pid, net, uts, user, uid_
     if mount:
         flags |= CLONE_NEWNS
     if pid:
-        # PID namespace has been unshared in parent process.
-        flags |= 0
+        pass  # PID namespace has been unshared in the parent process.
     if net:
         flags |= CLONE_NEWNET
     if uts:
         flags |= CLONE_NEWUTS
     unshare(flags)
-    if uts:
+    if uts and hostname:
         sethostname(hostname)
+    elif hostname:
+        logging.warning("UTS namespace not enabled. Not setting hostname.")
     logging.debug("Child PID: {}".format(os.getpid()))
-    if proc_path:
-        sys_mount(b"none", b"/proc", None, MS_PRIVATE | MS_REC, None)
-        sys_mount(b"proc", b"/proc", b"proc", MS_NOSUID | MS_NOEXEC | MS_NODEV, None)
+    if proc_path and pid:
+        sys_mount("none", "/proc", None, MS_PRIVATE | MS_REC, None)
+        sys_mount("proc", "/proc", "proc", MS_NOSUID | MS_NOEXEC | MS_NODEV, None)
         if proc_path != "/proc":
-            sys_mount(b"/proc", proc_path.encode("utf-8"), None, MS_BIND, None)
+            sys_mount("/proc", proc_path, None, MS_BIND, None)
         logging.debug("Mounted procfs at {}".format(proc_path))
-    # setuid to 'root' in the new user namespace.
-    os.setgid(100000)
-    os.setuid(100000)
+    elif proc_path and not pid:
+        logging.warning("PID namespace not enabled. Not mounting new procfs.")
     if user:
-        unshare(CLONE_NEWUSER)
         logging.debug("User Namespace Enabled")
+        # setgid and setuid to 'root' in the new user namespace.
+        target_uid = 65534
+        target_gid = 65534
+        for uid_item in uid_map:
+            in_start, out_start, length = [int(item) for item in re.split(" +", uid_item)]
+            if in_start <= 0 < in_start + length:
+                target_uid = out_start + (0 - in_start)
+        for gid_item in gid_map:
+            in_start, out_start, length = [int(item) for item in re.split(" +", gid_item)]
+            if in_start <= 0 < in_start + length:
+                target_gid = out_start + (0 - in_start)
+        os.setgid(target_gid)
+        os.setuid(target_uid)
+        unshare(CLONE_NEWUSER)
     # signal parent to update maps.
     pipe1.write(b' ')
     # wait for parent to update mappings.
     pipe2.read(1)
-    logging.debug("Child:Maps updated")
     os.execvp(cmd[0], cmd)
 
 
@@ -108,9 +127,8 @@ def nsexec(**kwargs):
     pid = os.fork()
     if pid != 0:
         # Wait for child to unshare all namespaces.
-        logging.debug("Waiting for child to unshare ns")
         pipe1.read(1)
-        logging.debug("Parent UID:{} eUID:{}".format(os.getuid(), os.geteuid()))
+        logging.debug("Parent UID:{} eUID:{} GID:{} eGID:{}".format(os.getuid(), os.geteuid(), os.getgid(), os.getegid()))
         new_pid = pid
         if "uid_map" in kwargs:
             logging.debug("uid_map:{}".format(repr(kwargs["uid_map"])))
@@ -120,11 +138,11 @@ def nsexec(**kwargs):
             logging.debug("gid_map:{}".format(repr(kwargs["gid_map"])))
             with open("/proc/{}/gid_map".format(str(new_pid)), "wb") as f:
                 f.write("\n".join(kwargs["gid_map"]).encode("utf-8"))
-                logging.debug("Parent:Maps updated")
+        logging.debug("Parent:Maps updated")
         os.setgid(1000)
         os.setuid(1000)
         pipe2.write(b' ')
         os.close(0)
         os.waitpid(pid, 0)
-    else:  # forked child
+    else:
         child(pipe1, pipe2, **kwargs)

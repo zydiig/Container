@@ -45,7 +45,7 @@ if __name__ == "__main__":
                       hostname="CONTAINER")
     else:
         os.waitpid(pid, 0)
-        umount(config["proc_path"])
+        umount(config["specs"]["proc_path"])
         for mount_ops in reversed(mounts):
             umount(mount_ops[2])
             # if not call('nsexec2 -C -i -m -p -u -U -P "/opt/testroot/proc" -M "0 100000 65536" -G "0 100000 65536" bash ./chroot.sh', shell=True):
