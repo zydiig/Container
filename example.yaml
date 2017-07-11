@@ -1,0 +1,15 @@
+features:
+  cgroup: true
+  ipc: true
+  mount: true
+  pid: true
+  net: false
+  uts: true
+  user: true
+specs:
+  proc_path: "/mnt/proc"
+  uid_map:
+    - "0 100000 65536"
+  gid_map:
+    - "0 100000 65536"
+  root_path: "/mnt"
