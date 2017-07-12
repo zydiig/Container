@@ -2,7 +2,7 @@ Container
 ==============
 Simple containers implemented in Python 3.
 
-*May not actually contain things*
+**May not actually contain things**
 
 Features
 ---------------
@@ -13,7 +13,7 @@ Features
 
 TODOs
 ---------
-- Custom bind mounts
+- Custom bind mounts ([bindfs](http://bindfs.org/) to change permissions or ownership?)
 - PTY support for shells inside containers
-- More customization choices
+- More customizable
 - Support for starting init (systemd?) inside containers

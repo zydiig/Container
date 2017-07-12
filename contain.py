@@ -1,13 +1,11 @@
+import argparse
 import logging
 import os
-import sys
 from subprocess import call
 
 import yaml
 
 import namespace
-
-logging.basicConfig(format='%(levelname)s:%(message)s', level=logging.INFO)
 
 
 def require_root(fn):
@@ -34,11 +32,16 @@ def umount(target, options=[]):
 
 
 if __name__ == "__main__":
-    target = sys.argv[1] if len(sys.argv) == 2 else "default.yaml"
-    config = yaml.load(open(target))
-    root_path = config["specs"]["root_path"]
-    t_uid = namespace.translate(0, config["specs"]["uid_map"])
-    t_gid = namespace.translate(0, config["specs"]["gid_map"])
+    parser = argparse.ArgumentParser(description="Starts a simple container.")
+    parser.add_argument("path", help="Path to the container specification file", metavar="CFG")
+    parser.add_argument("--verbose", "-v", help="Verbose mode", action="store_true", dest="verbose")
+    args = parser.parse_args()
+    logging.basicConfig(format='%(levelname)s:%(message)s', level=logging.DEBUG if args.verbose else logging.INFO)
+    config = yaml.load(open(args.path))
+    specs = config["specs"]
+    root_path = specs["root_path"]
+    t_uid = namespace.translate(0, specs["uid_map"])
+    t_gid = namespace.translate(0, specs["gid_map"])
     mounts = [
         ("sysfs", "sys", os.path.join(root_path, "sys"), ["nosuid", "noexec", "nodev", "ro"]),
         ("devtmpfs", "udev", os.path.join(root_path, "dev"), ["mode=0755", "nosuid"]),

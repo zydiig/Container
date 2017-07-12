@@ -18,6 +18,11 @@ MS_BIND = 4096
 MS_REC = 16384
 MS_PRIVATE = 262144
 
+MNT_FORCE = 1
+MNT_DETACH = 2
+MNT_EXPIRE = 4
+UMOUNT_NOFOLLOW = 8
+
 _libc = ctypes.CDLL("libc.so.6", use_errno=True)
 
 
@@ -30,6 +35,16 @@ def sys_mount(*kargs):
     kargs = [(karg.encode("utf-8") if isinstance(karg, str) else karg) for karg in kargs]
     if _libc.mount(*kargs) != 0:
         raise OSError(ctypes.get_errno(), os.strerror(ctypes.get_errno()))
+
+
+def sys_umount(target, flags=0):
+    target=target.encode("utf-8")
+    if not flags:
+        if _libc.umount(target) != 0:
+            raise OSError(ctypes.get_errno(), os.strerror(ctypes.get_errno()))
+    else:
+        if _libc.umount2(target, flags) != 0:
+            raise OSError(ctypes.get_errno(), os.strerror(ctypes.get_errno()))
 
 
 def sethostname(hostname: str):
@@ -68,7 +83,7 @@ def translate(idx, mappings):
 
 def child(pipe1, pipe2, cmd, root_path, flags, pid, user, uid_map, gid_map, hostname, env):
     """
-    Requires to be root.
+    Requires root privilege.
     User namespaces gives us a full set of caps, but that's too much of a hassle for me.
     """
     unshare(flags)
@@ -77,7 +92,7 @@ def child(pipe1, pipe2, cmd, root_path, flags, pid, user, uid_map, gid_map, host
     elif hostname:
         logging.warning("UTS namespace not enabled. Not setting hostname.")
     logging.debug("Child PID: {}".format(os.getpid()))
-    if pid:  # CLONE_NEWPID is not included in flags.
+    if pid:  # CLONE_NEWPID is not included in flags. Also we need to mount a new procfs to reflect the newly created PID namespace.
         sys_mount("proc", os.path.join(root_path, "proc"), "proc", MS_NOSUID | MS_NOEXEC | MS_NODEV, None)
     else:
         logging.warning("PID namespace is disabled. {}".format(pid))
@@ -132,10 +147,9 @@ def start_container(cmd, root_path, cgroup=True, ipc=True, mount=True, pid=True,
             with open("/proc/{}/gid_map".format(str(child_pid)), "wb") as f:
                 f.write("\n".join(gid_map).encode("utf-8"))
         logging.debug("Parent:Maps updated")
-        os.setgid(1000)
-        os.setuid(1000)
         pipe2.write(b' ')
         os.close(0)
         os.waitpid(child_pid, 0)
+        sys_umount(os.path.join(root_path,"proc"))
     else:
         child(pipe1, pipe2, cmd, root_path, flags, pid, user, uid_map, gid_map, hostname, env)
