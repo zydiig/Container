@@ -2,6 +2,7 @@ import ctypes
 import logging
 import os
 import re
+from functools import wraps
 
 CLONE_NEWNS = 0x00020000
 CLONE_NEWUTS = 0x04000000
@@ -11,12 +12,14 @@ CLONE_NEWPID = 0x20000000
 CLONE_NEWNET = 0x40000000
 CLONE_NEWCGROUP = 0x02000000  # from include/uapi/linux/sched.h in Linux source code.
 
+MS_RDONLY = 1
 MS_NOSUID = 2
 MS_NODEV = 4
 MS_NOEXEC = 8
 MS_BIND = 4096
 MS_REC = 16384
 MS_PRIVATE = 262144
+MS_STRICTATIME = 1 << 24
 
 MNT_FORCE = 1
 MNT_DETACH = 2
@@ -26,27 +29,37 @@ UMOUNT_NOFOLLOW = 8
 _libc = ctypes.CDLL("libc.so.6", use_errno=True)
 
 
-def unshare(flags):
+def require_root(fn):
+    @wraps(fn)
+    def wrapper(*kargs, **kwargs):
+        if os.geteuid() != 0:
+            raise Exception("Only root can do this.")
+        fn(*kargs, **kwargs)
+
+    return wrapper
+
+
+def sys_unshare(flags):
     if _libc.unshare(flags) != 0:
         raise OSError(ctypes.get_errno(), os.strerror(ctypes.get_errno()))
 
 
+@require_root
 def sys_mount(*kargs):
+    logging.debug(repr(kargs))
     kargs = [(karg.encode("utf-8") if isinstance(karg, str) else karg) for karg in kargs]
     if _libc.mount(*kargs) != 0:
         raise OSError(ctypes.get_errno(), os.strerror(ctypes.get_errno()))
 
 
+@require_root
 def sys_umount(target, flags=0):
-    target=target.encode("utf-8")
-    if not flags:
-        if _libc.umount(target) != 0:
-            raise OSError(ctypes.get_errno(), os.strerror(ctypes.get_errno()))
-    else:
-        if _libc.umount2(target, flags) != 0:
-            raise OSError(ctypes.get_errno(), os.strerror(ctypes.get_errno()))
+    target = target.encode("utf-8")
+    if _libc.umount2(target, flags) != 0:
+        raise OSError(ctypes.get_errno(), os.strerror(ctypes.get_errno()))
 
 
+@require_root
 def sethostname(hostname: str):
     cstr = hostname.encode("utf-8")
     if _libc.sethostname(cstr, len(cstr)) != 0:
@@ -86,7 +99,7 @@ def child(pipe1, pipe2, cmd, root_path, flags, pid, user, uid_map, gid_map, host
     Requires root privilege.
     User namespaces gives us a full set of caps, but that's too much of a hassle for me.
     """
-    unshare(flags)
+    sys_unshare(flags)
     if flags & CLONE_NEWUTS and hostname:
         sethostname(hostname)
     elif hostname:
@@ -105,16 +118,30 @@ def child(pipe1, pipe2, cmd, root_path, flags, pid, user, uid_map, gid_map, host
             logging.warning("The mappings does not covered UID 0 and GID 0.")
         os.setgid(target_gid)
         os.setuid(target_uid)
-        unshare(CLONE_NEWUSER)
+        sys_unshare(CLONE_NEWUSER)
     # signal parent to update maps.
     pipe1.write(b' ')
     # wait for parent to update mappings.
     pipe2.read(1)
     os.chroot(root_path)
-    os.chdir("/")
+    os.chdir("/")  # per chroot(2) manpage.
     os.execvpe(cmd[0], cmd, env)
 
 
+def run_in_new_process(fn):
+    @wraps(fn)
+    def wrapper(*kargs, **kwargs):
+        pid = os.fork()
+        if pid == 0:
+            fn(*kargs, **kwargs)
+            exit(0)
+        else:
+            os.waitpid(pid, 0)
+
+    return wrapper
+
+
+@run_in_new_process
 def start_container(cmd, root_path, cgroup=True, ipc=True, mount=True, pid=True, net=False, uts=True, user=True, uid_map=None, gid_map=None,
                     hostname="CONTAINER", env={}):
     pipe1 = Pipe()
@@ -132,24 +159,24 @@ def start_container(cmd, root_path, cgroup=True, ipc=True, mount=True, pid=True,
         flags |= CLONE_NEWUTS
     if pid:
         # calling unshare(CLONE_NEWPID) does not move the caller process into the new PID namespace, so we need to do this in advance.
-        unshare(CLONE_NEWPID)
+        sys_unshare(CLONE_NEWPID)
     child_pid = os.fork()
     if child_pid != 0:
         # Wait for child to unshare user namespaces before updating relevant mappings.
         pipe1.read(1)
-        logging.debug("Parent UID:{} eUID:{} GID:{} eGID:{}".format(os.getuid(), os.geteuid(), os.getgid(), os.getegid()))
-        if uid_map:
-            logging.debug("uid_map:{}".format(repr(uid_map)))
-            with open("/proc/{}/uid_map".format(str(child_pid)), "wb") as f:
-                f.write("\n".join(uid_map).encode("utf-8"))
-        if gid_map:
-            logging.debug("gid_map:{}".format(repr(gid_map)))
-            with open("/proc/{}/gid_map".format(str(child_pid)), "wb") as f:
-                f.write("\n".join(gid_map).encode("utf-8"))
-        logging.debug("Parent:Maps updated")
+        if user:
+            if uid_map:
+                logging.debug("uid_map:{}".format(repr(uid_map)))
+                with open("/proc/{}/uid_map".format(str(child_pid)), "wb") as f:
+                    f.write("\n".join(uid_map).encode("utf-8"))
+            if gid_map:
+                logging.debug("gid_map:{}".format(repr(gid_map)))
+                with open("/proc/{}/gid_map".format(str(child_pid)), "wb") as f:
+                    f.write("\n".join(gid_map).encode("utf-8"))
+            logging.debug("Parent:Maps updated")
         pipe2.write(b' ')
         os.close(0)
         os.waitpid(child_pid, 0)
-        sys_umount(os.path.join(root_path,"proc"))
+        sys_umount(os.path.join(root_path, "proc"))
     else:
         child(pipe1, pipe2, cmd, root_path, flags, pid, user, uid_map, gid_map, hostname, env)

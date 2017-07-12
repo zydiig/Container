@@ -17,3 +17,4 @@ TODOs
 - PTY support for shells inside containers
 - More customizable
 - Support for starting init (systemd?) inside containers
+- Automatic Xauth
