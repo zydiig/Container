@@ -4,7 +4,7 @@ Simple containers implemented in Python 3.
 
 **May not actually contain things**
 
-A example configuration file is included as `example.yaml`.
+An example configuration file is included as `example.yaml`.
 
 Features
 ---------------
