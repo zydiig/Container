@@ -9,6 +9,7 @@ Features
 - PID namespaces
 - User namespaces
 - YAML configuration files
+- Custom environment variables
 
 TODOs
 ---------

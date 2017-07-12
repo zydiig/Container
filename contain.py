@@ -52,8 +52,8 @@ if __name__ == "__main__":
     pid = os.fork()
     if pid == 0:
         namespace.start_container(config["specs"]["command"].split(" "), root_path, **config["features"],
-                                  uid_map=config["specs"]["uid_map"], gid_map=config["specs"]["gid_map"],
-                                  hostname=config["specs"]["hostname"])
+                                  uid_map=config["specs"].get("uid_map", ""), gid_map=config["specs"].get("gid_map", ""),
+                                  hostname=config["specs"].get("hostname", "CONTAINER"), env=config.get("env", {}))
     else:
         os.waitpid(pid, 0)
         for mount_ops in reversed(mounts):

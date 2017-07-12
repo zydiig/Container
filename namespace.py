@@ -66,7 +66,7 @@ def translate(idx, mappings):
             return translated_base + (idx - original_base)
 
 
-def child(pipe1, pipe2, cmd, root_path, flags, pid, user, uid_map, gid_map, hostname):
+def child(pipe1, pipe2, cmd, root_path, flags, pid, user, uid_map, gid_map, hostname, env):
     """
     Requires to be root.
     User namespaces gives us a full set of caps, but that's too much of a hassle for me.
@@ -97,11 +97,11 @@ def child(pipe1, pipe2, cmd, root_path, flags, pid, user, uid_map, gid_map, host
     pipe2.read(1)
     os.chroot(root_path)
     os.chdir("/")
-    os.execvp(cmd[0], cmd)
+    os.execvpe(cmd[0], cmd, env)
 
 
 def start_container(cmd, root_path, cgroup=True, ipc=True, mount=True, pid=True, net=False, uts=True, user=True, uid_map=None, gid_map=None,
-                    hostname="CONTAINER"):
+                    hostname="CONTAINER", env={}):
     pipe1 = Pipe()
     pipe2 = Pipe()
     flags = 0
@@ -138,4 +138,4 @@ def start_container(cmd, root_path, cgroup=True, ipc=True, mount=True, pid=True,
         os.close(0)
         os.waitpid(child_pid, 0)
     else:
-        child(pipe1, pipe2, cmd, root_path, flags, pid, user, uid_map, gid_map, hostname)
+        child(pipe1, pipe2, cmd, root_path, flags, pid, user, uid_map, gid_map, hostname, env)
