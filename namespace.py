@@ -159,8 +159,9 @@ def add_to_cgroup(pid, specs):
         os.mkdir("/sys/fs/cgroup/memory/{}".format(uuid))
         with open("/sys/fs/cgroup/memory/{}/memory.limit_in_bytes".format(uuid), "w") as f:
             f.write(specs["memory"]["physical"])
-        with open("/sys/fs/cgroup/memory/{}/memory.memsw.limit_in_bytes".format(uuid), "w") as f:
-            f.write(specs["memory"]["with_swap"])
+        if "with" in specs["memory"]:
+            with open("/sys/fs/cgroup/memory/{}/memory.memsw.limit_in_bytes".format(uuid), "w") as f:
+                f.write(specs["memory"]["with_swap"])
         with open("/sys/fs/cgroup/memory/{}/tasks".format(uuid), "w") as f:
             f.write(str(pid))
         paths.append("/sys/fs/cgroup/memory/{}".format(uuid))
