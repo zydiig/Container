@@ -19,3 +19,8 @@ env:
   "DISPLAY": ":0"
   "TERM": "xterm-256color"
   "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games"
+cgroups:
+  cpuset: [0,1]
+  memory:
+    physical: "1G"
+    with_swap: "2G"

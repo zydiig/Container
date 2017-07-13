@@ -38,7 +38,8 @@ if __name__ == "__main__":
     for mount_ops in mounts:
         mount(*mount_ops)
     start_container(specs["command"].split(" "), root_path, **config["features"], uid_map=specs.get("uid_map", ""),
-                    gid_map=specs.get("gid_map", ""), hostname=specs.get("hostname", "CONTAINER"), env=config.get("env", {}))
+                    gid_map=specs.get("gid_map", ""), hostname=specs.get("hostname", "CONTAINER"), env=config.get("env", {}),
+                    cgroup_specs=config.get("cgroups", {}))
     for mount_ops in reversed(mounts):
         try:
             sys_umount(mount_ops[2])

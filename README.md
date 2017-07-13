@@ -13,9 +13,11 @@ Features
 - YAML configuration files
 - Custom environment variables
 - Features can be turned on/off (not tested)
+- Limit CPU/Memory usage using cgroups
 
 TODOs
 ---------
+- More cgroups options
 - Move mounting-related code out from contain.py
 - Custom bind mounts ([bindfs](http://bindfs.org/) to change permissions or ownership?)
 - PTY support for shells inside containers

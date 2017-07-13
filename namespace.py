@@ -3,6 +3,7 @@ import logging
 import os
 import re
 from functools import wraps
+from uuid import uuid4
 
 CLONE_NEWNS = 0x00020000
 CLONE_NEWUTS = 0x04000000
@@ -34,7 +35,7 @@ def require_root(fn):
     def wrapper(*kargs, **kwargs):
         if os.geteuid() != 0:
             raise Exception("Only root can do this.")
-        fn(*kargs, **kwargs)
+        return fn(*kargs, **kwargs)
 
     return wrapper
 
@@ -141,9 +142,34 @@ def run_in_new_process(fn):
     return wrapper
 
 
+@require_root
+def add_to_cgroup(pid, specs):
+    uuid = str(uuid4())
+    paths = []
+    if "cpuset" in specs:
+        os.mkdir("/sys/fs/cgroup/cpuset/{}".format(uuid))
+        with open("/sys/fs/cgroup/cpuset/{}/cpuset.cpus".format(uuid), "w") as f:
+            f.write(",".join([str(i) for i in specs["cpuset"]]))
+        with open("/sys/fs/cgroup/cpuset/{}/cpuset.mems".format(uuid), "w") as f:
+            f.write("0")
+        with open("/sys/fs/cgroup/cpuset/{}/tasks".format(uuid), "w") as f:
+            f.write(str(pid))
+        paths.append("/sys/fs/cgroup/cpuset/{}".format(uuid))
+    if "memory" in specs:
+        os.mkdir("/sys/fs/cgroup/memory/{}".format(uuid))
+        with open("/sys/fs/cgroup/memory/{}/memory.limit_in_bytes".format(uuid), "w") as f:
+            f.write(specs["memory"]["physical"])
+        with open("/sys/fs/cgroup/memory/{}/memory.memsw.limit_in_bytes".format(uuid), "w") as f:
+            f.write(specs["memory"]["with_swap"])
+        with open("/sys/fs/cgroup/memory/{}/tasks".format(uuid), "w") as f:
+            f.write(str(pid))
+        paths.append("/sys/fs/cgroup/memory/{}".format(uuid))
+    return paths
+
+
 @run_in_new_process
 def start_container(cmd, root_path, cgroup=True, ipc=True, mount=True, pid=True, net=False, uts=True, user=True, uid_map=None, gid_map=None,
-                    hostname="CONTAINER", env={}):
+                    hostname="CONTAINER", env={}, cgroup_specs={}):
     pipe1 = Pipe()
     pipe2 = Pipe()
     flags = 0
@@ -162,6 +188,7 @@ def start_container(cmd, root_path, cgroup=True, ipc=True, mount=True, pid=True,
         sys_unshare(CLONE_NEWPID)
     child_pid = os.fork()
     if child_pid != 0:
+        cgroup_paths = add_to_cgroup(child_pid, cgroup_specs)
         # Wait for child to unshare user namespaces before updating relevant mappings.
         pipe1.read(1)
         if user:
@@ -178,5 +205,7 @@ def start_container(cmd, root_path, cgroup=True, ipc=True, mount=True, pid=True,
         os.close(0)
         os.waitpid(child_pid, 0)
         sys_umount(os.path.join(root_path, "proc"))
+        for path in cgroup_paths:
+            os.rmdir(path)
     else:
         child(pipe1, pipe2, cmd, root_path, flags, pid, user, uid_map, gid_map, hostname, env)
