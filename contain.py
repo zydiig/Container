@@ -3,6 +3,7 @@
 import argparse
 
 import yaml
+import traceback
 
 from namespace import *
 
@@ -10,6 +11,15 @@ from namespace import *
 @require_root
 def mount(fstype, source, target, flags=0, mount_options=[]):
     sys_mount(source, target, fstype, flags, ",".join(mount_options))
+
+
+def try_unmount_all(l):
+    for target in l:
+        try:
+            sys_umount(target)
+        except OSError:
+            logging.error("Unmounting {} failed.".format(target))
+            logging.error(traceback.format_exc())
 
 
 if __name__ == "__main__":
@@ -28,7 +38,7 @@ if __name__ == "__main__":
         t_uid = 0
         t_gid = 0
     mounts = [
-        ("sysfs", "sys", os.path.join(root_path, "sys"), MS_NOSUID | MS_NOEXEC | MS_NODEV | MS_RDONLY),
+        ("sysfs", "sys", os.path.join(root_path, "sys"), MS_NOSUID | MS_NOEXEC | MS_NODEV | MS_RDONLY,[]),
         ("devtmpfs", "udev", os.path.join(root_path, "dev"), MS_NOSUID, ["mode=0755"]),
         ("devpts", "devpts", os.path.join(root_path, "dev/pts"), MS_NOEXEC | MS_NOSUID, ["mode=0620", "gid=5"]),
         ("tmpfs", "shm", os.path.join(root_path, "dev/shm"), MS_NOSUID | MS_NODEV, ["mode=1777"]),
@@ -36,12 +46,14 @@ if __name__ == "__main__":
         ("tmpfs", "tmp", os.path.join(root_path, "tmp"), MS_STRICTATIME | MS_NODEV | MS_NOSUID, ["mode=1777"])
     ]
     for mount_ops in mounts:
-        mount(*mount_ops)
+        try:
+            mount(*mount_ops)
+        except OSError as e:
+            logging.debug(repr(mount_ops))
+            logging.error(traceback.format_exc())
+            try_unmount_all([mount_ops[2] for mount_ops in mounts])
+            exit(1)
     start_container(specs["command"].split(" "), root_path, **config["features"], uid_map=specs.get("uid_map", ""),
                     gid_map=specs.get("gid_map", ""), hostname=specs.get("hostname", "CONTAINER"), env=config.get("env", {}),
                     cgroup_specs=config.get("cgroups", {}))
-    for mount_ops in reversed(mounts):
-        try:
-            sys_umount(mount_ops[2])
-        except OSError:
-            logging.error("Unmounting {} failed.".format(mount_ops[2]))
+    try_unmount_all(reversed([mount_ops[2] for mount_ops in mounts]))
