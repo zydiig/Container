@@ -148,22 +148,9 @@ def run_in_new_process(fn):
                 tty.setraw(STDIN)
                 restore = True
             except tty.error:
-                logging.debug("som fail 1")
                 restore = False
             try:
-                fds = [STDIN, master_fd]
-                while True:
-                    rfd = select(fds, [], [])[0]
-                    if master_fd in rfd:
-                        data = os.read(master_fd, 1024)
-                        if not data:
-                            fds.remove(master_fd)
-                        os.write(STDIN, data)
-                    if STDIN in rfd:
-                        data = os.read(STDIN, 1024)
-                        if not data:
-                            fds.remove(STDIN)
-                        os.write(master_fd, data)
+                copy(STDIN,master_fd)
             except OSError:
                 if restore:
                     tty.tcsetattr(STDIN, tty.TCSAFLUSH, mode)
@@ -197,6 +184,22 @@ def add_to_cgroups(pid, specs):
             f.write(str(pid))
         paths.append("/sys/fs/cgroup/memory/{}".format(uuid))
     return paths
+
+
+def copy(fd1, fd2):
+    fds = [fd1, fd2]
+    while True:
+        rfd = select(fds, [], [])[0]
+        if fd1 in rfd:
+            data = os.read(fd1, 1024)
+            if not data:
+                fds.remove(fd1)
+            os.write(fd2, data)
+        if fd2 in rfd:
+            data = os.read(fd2, 1024)
+            if not data:
+                fds.remove(fd2)
+            os.write(fd1, data)
 
 
 @run_in_new_process
@@ -239,22 +242,9 @@ def start_container(cmd, root_path, cgroup=True, ipc=True, mount=True, pid=True,
             tty.setraw(STDIN)
             restore = True
         except tty.error:
-            logging.debug("som fail 2")
             restore = False
         try:
-            fds = [STDIN, master_fd]
-            while True:
-                rfd = select(fds, [], [])[0]
-                if master_fd in rfd:
-                    data = os.read(master_fd, 1024)
-                    if not data:
-                        fds.remove(master_fd)
-                    os.write(STDIN, data)
-                if STDIN in rfd:
-                    data = os.read(STDIN, 1024)
-                    if not data:
-                        fds.remove(STDIN)
-                    os.write(master_fd, data)
+            copy(STDIN,master_fd)
         except OSError:
             if restore:
                 tty.tcsetattr(0, tty.TCSAFLUSH, mode)
