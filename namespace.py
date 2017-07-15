@@ -1,12 +1,27 @@
 import ctypes
+import fcntl
 import logging
 import os
 import pty
 import re
+import struct
+import termios
 import tty
 from functools import wraps
 from select import select
 from uuid import uuid4
+
+
+def set_size(fd, row, col, xpix=0, ypix=0):
+    winsize = struct.pack("HHHH", row, col, xpix, ypix)
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, winsize)
+
+
+def get_size(fd):
+    data = bytearray(8)
+    fcntl.ioctl(fd, termios.TIOCGWINSZ, data, True)
+    return struct.unpack("HHHH", data)
+
 
 STDIN = 0
 
@@ -143,17 +158,7 @@ def run_in_new_process(fn):
             fn(*kargs, **kwargs)
             exit(0)
         else:
-            try:
-                mode = tty.tcgetattr(STDIN)
-                tty.setraw(STDIN)
-                restore = True
-            except tty.error:
-                restore = False
-            try:
-                copy(STDIN,master_fd)
-            except OSError:
-                if restore:
-                    tty.tcsetattr(STDIN, tty.TCSAFLUSH, mode)
+            link(STDIN, master_fd)
             os.waitpid(pid, 0)
 
     return wrapper
@@ -201,6 +206,21 @@ def copy(fd1, fd2):
                 fds.remove(fd2)
             os.write(fd1, data)
 
+def link(parent,child):
+    try:
+        mode = tty.tcgetattr(parent)
+        tty.setraw(parent)
+        rows, columns = get_size(parent)[0:2]
+        set_size(child, rows, columns)
+        restore = True
+    except tty.error:
+        restore = False
+    try:
+        copy(parent, child)
+    except OSError:
+        if restore:
+            tty.tcsetattr(parent, tty.TCSAFLUSH, mode)
+
 
 @run_in_new_process
 def start_container(cmd, root_path, cgroup=True, ipc=True, mount=True, pid=True, net=False, uts=True, user=True, uid_map=None, gid_map=None,
@@ -237,17 +257,7 @@ def start_container(cmd, root_path, cgroup=True, ipc=True, mount=True, pid=True,
                     f.write("\n".join(gid_map).encode("utf-8"))
             logging.debug("Parent:Maps updated")
         pipe2.write(b' ')
-        try:
-            mode = tty.tcgetattr(STDIN)
-            tty.setraw(STDIN)
-            restore = True
-        except tty.error:
-            restore = False
-        try:
-            copy(STDIN,master_fd)
-        except OSError:
-            if restore:
-                tty.tcsetattr(0, tty.TCSAFLUSH, mode)
+        link(STDIN,master_fd)
         os.waitpid(child_pid, 0)
         sys_umount(os.path.join(root_path, "proc"))
         for path in cgroup_paths:
