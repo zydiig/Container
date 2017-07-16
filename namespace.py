@@ -5,6 +5,7 @@ import os
 import pty
 import re
 import struct
+import subprocess
 import termios
 import tty
 from functools import wraps
@@ -206,7 +207,8 @@ def copy(fd1, fd2):
                 fds.remove(fd2)
             os.write(fd1, data)
 
-def link(parent,child):
+
+def link(parent, child):
     try:
         mode = tty.tcgetattr(parent)
         tty.setraw(parent)
@@ -222,7 +224,22 @@ def link(parent,child):
             tty.tcsetattr(parent, tty.TCSAFLUSH, mode)
 
 
-@run_in_new_process
+def bindfs_mount(root_path, spec, uid, gid):
+    cmd = ["bindfs", spec["source"], os.path.join(root_path, spec.get("target", spec["source"]).lstrip("/")), "--force-user={}".format(uid),
+           "--force-group={}".format(gid), "--chown-deny", "--chgrp-deny", "--chmod-deny"]
+    if spec.get("ro", False):
+        cmd.append("-r")
+    subprocess.check_call(cmd)
+    return cmd[2]
+
+
+def bind_mount(root_path, spec):
+    target = os.path.join(root_path, spec.get("target", spec["source"]).lstrip("/"))
+    sys_mount(spec["source"], target, None, MS_BIND, None)
+    return target
+
+
+@run_in_new_process  # Fork and run in order to avoid affecting the caller process
 def start_container(cmd, root_path, cgroup=True, ipc=True, mount=True, pid=True, net=False, uts=True, user=True, uid_map=None, gid_map=None,
                     hostname="CONTAINER", env={}, cgroup_specs={}):
     pipe1 = Pipe()
@@ -257,7 +274,7 @@ def start_container(cmd, root_path, cgroup=True, ipc=True, mount=True, pid=True,
                     f.write("\n".join(gid_map).encode("utf-8"))
             logging.debug("Parent:Maps updated")
         pipe2.write(b' ')
-        link(STDIN,master_fd)
+        link(STDIN, master_fd)
         os.waitpid(child_pid, 0)
         sys_umount(os.path.join(root_path, "proc"))
         for path in cgroup_paths:

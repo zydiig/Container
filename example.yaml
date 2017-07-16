@@ -24,3 +24,12 @@ cgroups:
   memory:
     physical: "1G"
     with_swap: "2G"
+mounts:
+  - source: "/test"
+    target: "/test"
+    type: "bind"
+    ro: true
+  - source: "/test2"
+    target: "/test2"
+    type: "bindfs"
+    ro: true
