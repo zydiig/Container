@@ -1,6 +1,6 @@
 Container
 ==============
-Simple containers implemented in Python 3.
+Simple containers implemented in Python 3 (3.6+).
 
 **May not actually contain things**
 
@@ -21,8 +21,6 @@ TODOs
 - More cgroups options
 - Move mounting-related code out from contain.py
 - PTY support for shells inside containers
-- Be more customizable
-- Support for starting `init` (`systemd`?) inside containers
 - Automatic Xauth
 - Network namespace and automated virtual ethernet adapters creation
 

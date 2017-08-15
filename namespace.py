@@ -1,113 +1,37 @@
-import ctypes
-import fcntl
 import logging
 import os
 import pty
 import re
-import struct
 import subprocess
-import termios
 import tty
-from functools import wraps
 from select import select
 from uuid import uuid4
+import traceback
+from enum import Enum
+from syscalls import *
 
 
-def set_size(fd, row, col, xpix=0, ypix=0):
-    winsize = struct.pack("HHHH", row, col, xpix, ypix)
-    fcntl.ioctl(fd, termios.TIOCSWINSZ, winsize)
-
-
-def get_size(fd):
-    data = bytearray(8)
-    fcntl.ioctl(fd, termios.TIOCGWINSZ, data, True)
-    return struct.unpack("HHHH", data)
-
-
-STDIN = 0
-
-CLONE_NEWNS = 0x00020000
-CLONE_NEWUTS = 0x04000000
-CLONE_NEWIPC = 0x08000000
-CLONE_NEWUSER = 0x10000000
-CLONE_NEWPID = 0x20000000
-CLONE_NEWNET = 0x40000000
-CLONE_NEWCGROUP = 0x02000000  # from include/uapi/linux/sched.h in Linux source code.
-
-MS_RDONLY = 1
-MS_NOSUID = 2
-MS_NODEV = 4
-MS_NOEXEC = 8
-MS_BIND = 4096
-MS_REC = 16384
-MS_PRIVATE = 262144
-MS_STRICTATIME = 1 << 24
-
-MNT_FORCE = 1
-MNT_DETACH = 2
-MNT_EXPIRE = 4
-UMOUNT_NOFOLLOW = 8
-
-_libc = ctypes.CDLL("libc.so.6", use_errno=True)
+def try_unmount_all(l):
+    successes = []
+    for target in l:
+        try:
+            sys_umount(target, MNT_DETACH)
+        except OSError:
+            logging.error(f"Unmounting {target} failed.")
+            logging.error(traceback.format_exc())
+        else:
+            successes.append(target)
+    return successes
 
 
 def require_root(fn):
     @wraps(fn)
     def wrapper(*kargs, **kwargs):
         if os.geteuid() != 0:
-            raise Exception("Only root can do this.")
+            raise Exception("This operation requires root permission")
         return fn(*kargs, **kwargs)
 
     return wrapper
-
-
-def sys_unshare(flags):
-    if _libc.unshare(flags) != 0:
-        raise OSError(ctypes.get_errno(), os.strerror(ctypes.get_errno()))
-
-
-@require_root
-def sys_mount(*kargs):
-    logging.debug(repr(kargs))
-    kargs = [(karg.encode("utf-8") if isinstance(karg, str) else karg) for karg in kargs]
-    if _libc.mount(*kargs) != 0:
-        raise OSError(ctypes.get_errno(), os.strerror(ctypes.get_errno()))
-
-
-@require_root
-def sys_umount(target, flags=0):
-    logging.debug(repr(target))
-    target = target.encode("utf-8")
-    if _libc.umount2(target, flags) != 0:
-        raise OSError(ctypes.get_errno(), os.strerror(ctypes.get_errno()))
-
-
-@require_root
-def sethostname(hostname: str):
-    cstr = hostname.encode("utf-8")
-    if _libc.sethostname(cstr, len(cstr)) != 0:
-        raise OSError(ctypes.get_errno(), os.strerror(ctypes.get_errno()))
-
-
-class Pipe:
-    """Inheritable pipes for IPC"""
-
-    def __init__(self):
-        self.r, self.w = os.pipe()
-        os.set_inheritable(self.r, True)
-        os.set_inheritable(self.w, True)
-
-    def close_read(self):
-        os.close(self.r)
-
-    def close_write(self):
-        os.close(self.w)
-
-    def read(self, n):
-        return os.read(self.r, n)
-
-    def write(self, bs):
-        os.write(self.w, bs)
 
 
 def translate(idx, mappings):
@@ -126,19 +50,19 @@ def child(pipe1, pipe2, cmd, root_path, flags, pid, user, uid_map, gid_map, host
     if flags & CLONE_NEWUTS and hostname:
         sethostname(hostname)
     elif hostname:
-        logging.warning("UTS namespace not enabled. Not setting hostname.")
-    logging.debug("Child PID: {}".format(os.getpid()))
+        logging.warning("UTS namespace not enabled, not setting hostname")
+    logging.debug(f"Child PID: {os.getpid()}")
     if pid:  # CLONE_NEWPID is not included in flags. Also we need to mount a new procfs to reflect the newly created PID namespace.
         sys_mount("proc", os.path.join(root_path, "proc"), "proc", MS_NOSUID | MS_NOEXEC | MS_NODEV, None)
     else:
-        logging.warning("PID namespace is disabled. {}".format(pid))
+        logging.warning("PID namespace is disabled")
     if user:
-        logging.debug("User namespace is enabled.")
+        logging.debug("User namespace is enabled")
         # setgid and setuid to 'root' in the new user namespace.
         target_uid = translate(0, uid_map) or 65534
         target_gid = translate(0, gid_map) or 65534
         if target_gid == 65534 or target_uid == 65534:
-            logging.warning("The mappings does not covered UID 0 and GID 0.")
+            logging.warning("UID 0 and GID 0 are not mapped correctly")
         os.setgid(target_gid)
         os.setuid(target_uid)
         sys_unshare(CLONE_NEWUSER)
@@ -151,7 +75,7 @@ def child(pipe1, pipe2, cmd, root_path, flags, pid, user, uid_map, gid_map, host
     os.execvpe(cmd[0], cmd, env)
 
 
-def run_in_new_process(fn):
+def exec_in_new_process(fn):
     @wraps(fn)
     def wrapper(*kargs, **kwargs):
         pid, master_fd = pty.fork()
@@ -171,24 +95,24 @@ def add_to_cgroups(pid, specs):
     uuid = str(uuid4())
     paths = []
     if "cpuset" in specs:
-        os.mkdir("/sys/fs/cgroup/cpuset/{}".format(uuid))
-        with open("/sys/fs/cgroup/cpuset/{}/cpuset.cpus".format(uuid), "w") as f:
+        os.mkdir(f"/sys/fs/cgroup/cpuset/{uuid}")
+        with open(f"/sys/fs/cgroup/cpuset/{uuid}/cpuset.cpus", "w") as f:
             f.write(",".join([str(i) for i in specs["cpuset"]]))
-        with open("/sys/fs/cgroup/cpuset/{}/cpuset.mems".format(uuid), "w") as f:
+        with open(f"/sys/fs/cgroup/cpuset/{uuid}/cpuset.mems", "w") as f:
             f.write("0")  # Do we really need to take NUMA into account?
-        with open("/sys/fs/cgroup/cpuset/{}/tasks".format(uuid), "w") as f:
+        with open(f"/sys/fs/cgroup/cpuset/{uuid}/tasks", "w") as f:
             f.write(str(pid))
-        paths.append("/sys/fs/cgroup/cpuset/{}".format(uuid))
+        paths.append(f"/sys/fs/cgroup/cpuset/{uuid}")
     if "memory" in specs:
-        os.mkdir("/sys/fs/cgroup/memory/{}".format(uuid))
-        with open("/sys/fs/cgroup/memory/{}/memory.limit_in_bytes".format(uuid), "w") as f:
+        os.mkdir(f"/sys/fs/cgroup/memory/{uuid}")
+        with open(f"/sys/fs/cgroup/memory/{uuid}/memory.limit_in_bytes", "w") as f:
             f.write(specs["memory"]["physical"])
-        if "with" in specs["memory"]:
-            with open("/sys/fs/cgroup/memory/{}/memory.memsw.limit_in_bytes".format(uuid), "w") as f:
+        if "with_swap" in specs["memory"]:
+            with open(f"/sys/fs/cgroup/memory/{uuid}/memory.memsw.limit_in_bytes", "w") as f:
                 f.write(specs["memory"]["with_swap"])
-        with open("/sys/fs/cgroup/memory/{}/tasks".format(uuid), "w") as f:
+        with open(f"/sys/fs/cgroup/memory/{uuid}/tasks", "w") as f:
             f.write(str(pid))
-        paths.append("/sys/fs/cgroup/memory/{}".format(uuid))
+        paths.append(f"/sys/fs/cgroup/memory/{uuid}")
     return paths
 
 
@@ -208,25 +132,25 @@ def copy(fd1, fd2):
             os.write(fd1, data)
 
 
-def link(parent, child):
+def link(parent_fd, child_fd):
     try:
-        mode = tty.tcgetattr(parent)
-        tty.setraw(parent)
-        rows, columns = get_size(parent)[0:2]
-        set_size(child, rows, columns)
+        mode = tty.tcgetattr(parent_fd)
+        tty.setraw(parent_fd)
+        rows, columns = get_size(parent_fd)[0:2]
+        set_size(child_fd, rows, columns)
         restore = True
     except tty.error:
         restore = False
     try:
-        copy(parent, child)
+        copy(parent_fd, child_fd)
     except OSError:
         if restore:
-            tty.tcsetattr(parent, tty.TCSAFLUSH, mode)
+            tty.tcsetattr(parent_fd, tty.TCSAFLUSH, mode)
 
 
 def bindfs_mount(root_path, spec, uid, gid):
-    cmd = ["bindfs", spec["source"], os.path.join(root_path, spec.get("target", spec["source"]).lstrip("/")), "--force-user={}".format(uid),
-           "--force-group={}".format(gid), "--chown-deny", "--chgrp-deny", "--chmod-deny"]
+    cmd = ["bindfs", spec["source"], os.path.join(root_path, spec.get("target", spec["source"]).lstrip("/")), f"--force-user={uid}",
+           f"--force-group={gid}", "--chown-deny", "--chgrp-deny", "--chmod-deny"]
     if spec.get("ro", False):
         cmd.append("-r")
     subprocess.check_call(cmd)
@@ -239,45 +163,137 @@ def bind_mount(root_path, spec):
     return target
 
 
-@run_in_new_process  # Fork and run in order to avoid affecting the caller process
-def start_container(cmd, root_path, cgroup=True, ipc=True, mount=True, pid=True, net=False, uts=True, user=True, uid_map=None, gid_map=None,
-                    hostname="CONTAINER", env={}, cgroup_specs={}):
-    pipe1 = Pipe()
-    pipe2 = Pipe()
-    flags = 0
-    if cgroup:
-        flags |= CLONE_NEWCGROUP
-    if ipc:
-        flags |= CLONE_NEWIPC
-    if mount:
-        flags |= CLONE_NEWNS
-    if net:
-        flags |= CLONE_NEWNET
-    if uts:
-        flags |= CLONE_NEWUTS
-    if pid:
-        # calling unshare(CLONE_NEWPID) does not move the caller process into the new PID namespace, so we need to do this in advance.
-        sys_unshare(CLONE_NEWPID)
-    child_pid, master_fd = pty.fork()
-    if child_pid != 0:
-        cgroup_paths = add_to_cgroups(child_pid, cgroup_specs)
-        # Wait for child to unshare user namespaces before updating relevant mappings.
-        pipe1.read(1)
-        if user:
-            if uid_map:
-                logging.debug("uid_map:{}".format(repr(uid_map)))
-                with open("/proc/{}/uid_map".format(str(child_pid)), "wb") as f:
-                    f.write("\n".join(uid_map).encode("utf-8"))
-            if gid_map:
-                logging.debug("gid_map:{}".format(repr(gid_map)))
-                with open("/proc/{}/gid_map".format(str(child_pid)), "wb") as f:
-                    f.write("\n".join(gid_map).encode("utf-8"))
-            logging.debug("Parent:Maps updated")
-        pipe2.write(b' ')
-        link(STDIN, master_fd)
-        os.waitpid(child_pid, 0)
-        sys_umount(os.path.join(root_path, "proc"))
-        for path in cgroup_paths:
+@require_root
+def mount(fstype, source, target, flags=0, mount_options=[]):
+    sys_mount(source, target, fstype, flags, ",".join(mount_options))
+    return target
+
+
+class ContainerStatus(Enum):
+    STOPPED = 0
+    RUNNING = 1
+    ERROR = 2
+
+
+class Container:
+    def __init__(self, cmd, root_path, cgroup=True, ipc=True, mount=True, pid=True, net=False, uts=True, user=True, uid_map=None, gid_map=None,
+                 hostname="CONTAINER", env={}, cgroup_specs={}, custom_mounts=[]):
+        self.flags = 0
+        if cgroup:
+            self.flags |= CLONE_NEWCGROUP
+        if ipc:
+            self.flags |= CLONE_NEWIPC
+        if mount:
+            self.flags |= CLONE_NEWNS
+        if net:
+            self.flags |= CLONE_NEWNET
+        if uts:
+            self.flags |= CLONE_NEWUTS
+        self.cmd, self.root_path = cmd, root_path
+        self.pid_namespace = pid
+        self.user_namespace = user
+        self.uid_map, self.gid_map = uid_map, gid_map
+        self.hostname = hostname
+        self.env = env
+        self.mountpoints = []
+        self.status = ContainerStatus.STOPPED
+        self.cgroup_specs = cgroup_specs
+        self.t_uid = 0
+        self.t_gid = 0
+        self.child_pid = 0
+        self.cgroup_paths = []
+        self.custom_mounts = custom_mounts
+
+    def apply_cgroups(self):
+        return add_to_cgroups(self.child_pid, self.cgroup_specs)
+
+    @exec_in_new_process
+    def start(self):
+        self.status = ContainerStatus.RUNNING
+        pipe1 = Pipe()
+        pipe2 = Pipe()
+        if self.pid_namespace:
+            sys_unshare(CLONE_NEWPID)
+        self.child_pid, master_fd = pty.fork()
+        if self.child_pid != 0:
+            self.cgroup_paths = self.apply_cgroups()
+            # Wait for child to unshare user namespaces before updating relevant mappings.
+            pipe1.read(1)
+            if self.user_namespace:
+                if self.uid_map:
+                    logging.debug(f"uid_map:{repr(self.uid_map)}")
+                    with open(f"/proc/{str(self.child_pid)}/uid_map", "w") as f:
+                        f.write("\n".join(self.uid_map))
+                if self.gid_map:
+                    logging.debug(f"gid_map:{repr(self.gid_map)}")
+                    with open(f"/proc/{str(self.child_pid)}/gid_map", "w") as f:
+                        f.write("\n".join(self.gid_map))
+                logging.debug("Parent:Maps updated")
+            pipe2.write(b' ')
+            link(STDIN, master_fd)
+            os.waitpid(self.child_pid, 0)
+            self.status = ContainerStatus.STOPPED
+            sys_umount(os.path.join(self.root_path, "proc"))
+        else:
+            child(pipe1, pipe2, self.cmd, self.root_path, self.flags, self.pid_namespace, self.user_namespace, self.uid_map, self.gid_map,
+                  self.hostname, self.env)
+
+    @require_root
+    def do_mount(self, processor=None):
+        if self.user_namespace:
+            self.t_uid = translate(0, self.uid_map)
+            self.t_gid = translate(0, self.gid_map)
+        else:
+            self.t_uid = 0
+            self.t_gid = 0
+        mount_params_list = [
+            ("sysfs", "sys", os.path.join(self.root_path, "sys"), MS_NOSUID | MS_NOEXEC | MS_NODEV | MS_RDONLY, []),
+            ("devtmpfs", "udev", os.path.join(self.root_path, "dev"), MS_NOSUID, ["mode=0755"]),
+            ("devpts", "devpts", os.path.join(self.root_path, "dev/pts"), MS_NOEXEC | MS_NOSUID, ["mode=0620", "gid=5"]),
+            ("tmpfs", "shm", os.path.join(self.root_path, "dev/shm"), MS_NOSUID | MS_NODEV, ["mode=1777"]),
+            ("tmpfs", "run", os.path.join(self.root_path, "run"), MS_NOSUID | MS_NODEV, ["mode=0755", f"uid={self.t_uid}", f"gid={self.t_gid}"]),
+            ("tmpfs", "tmp", os.path.join(self.root_path, "tmp"), MS_STRICTATIME | MS_NODEV | MS_NOSUID, ["mode=1777"])
+        ]
+        if callable(processor):
+            processor(mount_params_list)
+        for mount_params in mount_params_list:
+            try:
+                self.mountpoints.append(mount(*mount_params))
+            except OSError:
+                logging.error(f"Mounting {mount_params[2]} failed.")
+                logging.debug(traceback.format_exc())
+                try_unmount_all([x[2] for x in mount_params_list])
+                exit(1)
+        for mount_spec in self.custom_mounts:
+            try:
+                if 'type' not in mount_spec or mount_spec['type'] == 'bind':
+                    self.mountpoints.append(bind_mount(self.root_path, mount_spec))
+                elif mount_spec["type"] == "bindfs":
+                    self.mountpoints.append(bindfs_mount(self.root_path, mount_spec, self.t_uid, self.t_gid))
+            except (OSError, subprocess.CalledProcessError, KeyError):
+                logging.debug(traceback.format_exc())
+                logging.debug(repr(mount_spec))
+                logging.error("A binding operation failed. Quitting")
+                try_unmount_all(self.mountpoints)
+                self.status = ContainerStatus.ERROR
+                exit(1)
+
+    @require_root
+    def do_umount(self):
+        for mountpoint in try_unmount_all(reversed(self.mountpoints)):
+            self.mountpoints.remove(mountpoint)
+        if self.mountpoints:
+            logging.error(f"Cleanup incomplete, failed to unmount {repr(self.mountpoints)}")
+
+    @require_root
+    def cleanup(self):
+        self.do_umount()
+        for path in self.cgroup_paths:
             os.rmdir(path)
-    else:
-        child(pipe1, pipe2, cmd, root_path, flags, pid, user, uid_map, gid_map, hostname, env)
+
+    def __enter__(self):
+        self.do_mount()
+        self.start()
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.cleanup()
